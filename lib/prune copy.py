@@ -55,7 +55,7 @@ def check_sparsity(model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
-def prepare_calibration_input(model, dataloader, device,nsamples=440):
+def prepare_calibration_input(model, dataloader, device):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
@@ -65,7 +65,7 @@ def prepare_calibration_input(model, dataloader, device,nsamples=440):
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -87,12 +87,12 @@ def prepare_calibration_input(model, dataloader, device,nsamples=440):
             pass 
     layers[0] = layers[0].module
 
-    # outs = torch.zeros_like(inps)
+    outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
     model.config.use_cache = use_cache
 
-    return inps, None, attention_mask, position_ids 
+    return inps, outs, attention_mask, position_ids 
 
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
@@ -404,13 +404,16 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
     model.config.use_cache = False 
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders("red",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders("wikitext2",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
+    
     with torch.no_grad():
-        inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device,args.nsamples)
+        inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
     layers = model.model.layers
     
     for i in range(len(layers)):
+        # if i==16:
+        #     break
         layer = layers[i]
         subset = find_layers(layer)
 
@@ -418,10 +421,11 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             dev = model.hf_device_map[f"model.layers.{i}"]
             print(dev)
             inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
-        inps = inps.cpu()
+
         wrapped_layers = {}
         for name in subset:
-            wrapped_layers[name] = Quantization(subset[name],bolck_size=None,codebook_num=4)
+            wrapped_layers[name] = Quantization(subset[name],bolck_size=64,codebook_num=4)
+
         print(inps[0].shape)
         def add_batch(name):
             def tmp(_, inp, out):
@@ -433,42 +437,45 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
             with torch.no_grad():
-                inps[j] = layer(inps[j].unsqueeze(0).to(device), attention_mask=attention_mask, position_ids=position_ids)[0].cpu()
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
         for name in subset:
-            print(f"pruning layer {i} name {name}-----------------------")
-            # svd-LLM
-            # raw_scaling_diag_matrix = wrapped_layers[name].H.clone()
-            # scaling_diag_matrix,scaling_matrix_inv=Cholesk(raw_scaling_diag_matrix)
-            # scaling_diag_matrix=scaling_diag_matrix.float()
-            # scaling_matrix_inv=scaling_matrix_inv.half()
+            print(f"pruning layer {i} name {name}")
+            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+            reference_weight = subset[name].weight.detach()  
             
             # asvd
-            s = wrapped_layers[name].scaler_row.view(1,-1)**0.5
+            s=torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+            s_diag=torch.diag(s[0])
+            s_inverse = torch.inverse(torch.diag_embed(s[0]))
+            s_inverse = s_inverse.half()
             
-            # subset[name].weight.data = wrapped_layers[name].reconstructed_data_merge
+            # svd-LLM
+            raw_scaling_diag_matrix = wrapped_layers[name].H.clone()
+            scaling_diag_matrix,scaling_matrix_inv=Cholesk(raw_scaling_diag_matrix)
+            scaling_diag_matrix=scaling_diag_matrix.float()
+            scaling_matrix_inv=scaling_matrix_inv.half()
+
+            
+            # X(W-Wq-LR)
+            # output = low_rank_decomposition(wrapped_layers[name].residual@s_diag, reduced_rank=64)
+            # wrapped_layers[name].L = torch.nn.Parameter(output['L'])
+            # wrapped_layers[name].R = torch.nn.Parameter(output['R']@s_inverse)
+            # wrapped_layers[name].reduced_rank = output['reduced_rank']
+            
+                     
             opt = torch.optim.Adam(wrapped_layers[name].parameters(), lr=1e-3, betas=(0.0, 0.95), amsgrad=True)
-            reference_weight = subset[name].weight.detach()
-            print_frequency = 20
-            N = 100  # 连续N轮loss没有显著下降则退出
-            threshold = 0.001  # 显著下降的阈值
-            loss_prev = float('inf')  # 初始化为无穷大
-            counter = 0  # 连续不显著下降的轮数
-            
-            # lowrank 初始化
-            residual=(reference_weight-wrapped_layers[name]()).float()
-            output = low_rank_decomposition(residual*s, reduced_rank=256)
-            L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
-            L=L.half().detach()
-            R=R.half().detach()
-            
+            print_frequency = 50
             for epoch in range(200):
+                
                 start = time.perf_counter()
-                delta_weight = (reference_weight-torch.mm(L, R)/s-wrapped_layers[name]()).float()
+                
+                # delta_weight = (reference_weight - wrapped_layers[name]() - torch.mm(wrapped_layers[name].L,wrapped_layers[name].R)).double()
+                delta_weight = (reference_weight - wrapped_layers[name]()).double()
                 loss2 = ((delta_weight)**2).mean()
-                loss = (delta_weight@wrapped_layers[name].H).flatten() @ delta_weight.flatten() / len(delta_weight) + 0.1*loss2
+                loss = (delta_weight@wrapped_layers[name].H ).flatten() @ delta_weight.flatten() / len(delta_weight)
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
@@ -476,42 +483,41 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
                 if epoch % print_frequency == 0:
                     print(f"loss={loss.item():.10f}\t",
                         f"time_on_epoch {epoch} = {time.perf_counter() - start}")
-                    # Early stopping check
-                loss_change = loss_prev - loss.item()  # 计算loss变化
-                if loss_change < threshold:
-                    counter += 1  # 如果loss下降不显著，则增加计数器
-                    if counter >= N:  # 如果连续N轮下降不显著，则提前退出
-                        print(f"Early stopping at epoch {epoch} as loss has not significantly decreased for {N} consecutive epochs.")
-                        break
-                else:
-                    counter = 0  # 如果loss显著下降，则重置计数器
-                loss_prev = loss.item()
-                if epoch % 20 == 0:
-                    wrapped_layers[name].update_index(torch.mm(L, R)/s)
-                    residual=(reference_weight-wrapped_layers[name]()).float()
-                    output = low_rank_decomposition(residual*s, reduced_rank=256)
-                    L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
-                    L=L.half().detach()
-                    R=R.half().detach()
-                # print(wrapped_layers[name].scales)
-                        # asvd || svd-LLM
-            # subset[name].weight.data = wrapped_layers[name]().half()
-            # residual=(reference_weight-subset[name].weight.data).float()
-            # output = low_rank_decomposition(residual@scaling_diag_matrix, reduced_rank=256)
-            # L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
-            # L=L.half()
-            # R=R.half()
-                       
-            subset[name].weight.data=(wrapped_layers[name]().half()+torch.mm(L, R)/s).half()
-            print(subset[name].weight.data.dtype)
-            del wrapped_layers[name]
-            torch.cuda.empty_cache()
-            # subset[name].weight.data = quantize(subset[name].weight.data)
-        # for j in range(args.nsamples):
-        #     with torch.no_grad():
-        #         outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        # inps, outs = outs, inps
+                if epoch % 50 == 0:
+                    wrapped_layers[name].update_index()
 
+            # lowrank=torch.mm(wrapped_layers[name].L,wrapped_layers[name].R)
+            # subset[name].weight.data = wrapped_layers[name]().half()+lowrank.half()
+
+            
+            
+            # svd
+#             residual=(reference_weight-subset[name].weight.data).float()
+#             output = low_rank_decomposition(residual, reduced_rank=256)
+#             L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
+#             L=L.half()
+#             R=R.half()
+            
+#             subset[name].weight.data=subset[name].weight.data+torch.mm(L, R)
+            
+            
+            # asvd || svd-LLM
+            subset[name].weight.data = wrapped_layers[name]().half()
+            residual=(reference_weight-subset[name].weight.data).float()
+            output = low_rank_decomposition(residual@scaling_diag_matrix, reduced_rank=256)
+            L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
+            L=L.half()
+            R=R.half()
+                       
+            subset[name].weight.data=subset[name].weight.data+torch.mm(L, R)@scaling_matrix_inv
+            
+            
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        inps, outs = outs, inps
+    
+    
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
     
@@ -563,10 +569,3 @@ def low_rank_decomposition(weight, reduced_rank=32):
     print(f"L: {L.shape} | R: {R.shape}")
 
     return {"L": L, "R": R, "U": U, "S": S, "Vh": Vh, 'reduced_rank': reduced_rank}  
-
-def kl_divergence(tensor, Qtensor):     
-    tensor_prob = F.softmax(tensor.view(-1), dim=0) 
-    quantized_prob = F.softmax(Qtensor.view(-1), dim=0)
-    kl_divergence = torch.sum(tensor_prob * (torch.log(tensor_prob) - torch.log(quantized_prob)))
-    # print("KL散度为:", kl_divergence.item())
-    return kl_divergence.item()
