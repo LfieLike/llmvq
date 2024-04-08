@@ -5,9 +5,10 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from importlib.metadata import version
 
-from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers
+from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers,prune_pq
 from lib.eval import eval_ppl, eval_zero_shot
-
+# export HF_ENDPOINT=https://hf-mirror.com
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 print('torch', version('torch'))
 print('transformers', version('transformers'))
 print('accelerate', version('accelerate'))
@@ -17,19 +18,20 @@ def get_llm(model_name, cache_dir="llm_weights"):
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         torch_dtype=torch.float16, 
-        cache_dir=cache_dir, 
+        # cache_dir=cache_dir, 
         low_cpu_mem_usage=True, 
         device_map="auto"
     )
-
+    
     model.seqlen = model.config.max_position_embeddings 
+    print("seqlen:",model.seqlen)
     return model
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, help='LLaMA model')
     parser.add_argument('--seed', type=int, default=0, help='Seed for sampling the calibration data.')
-    parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
+    parser.add_argument('--nsamples', type=int, default=440, help='Number of calibration samples.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
     parser.add_argument("--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"])
     parser.add_argument("--prune_method", type=str, choices=["magnitude", "wanda", "sparsegpt", 
@@ -66,7 +68,7 @@ def main():
     if args.sparsity_ratio != 0:
         print("pruning starts")
         if args.prune_method == "wanda":
-            prune_wanda(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
+            prune_pq(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif args.prune_method == "magnitude":
             prune_magnitude(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif args.prune_method == "sparsegpt":
