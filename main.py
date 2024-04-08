@@ -8,6 +8,7 @@ from importlib.metadata import version
 from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers,prune_pq
 from lib.eval import eval_ppl, eval_zero_shot
 # export HF_ENDPOINT=https://hf-mirror.com
+# export CUDA_VISIBLE_DEVICES=3
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 print('torch', version('torch'))
 print('transformers', version('transformers'))
@@ -22,8 +23,8 @@ def get_llm(model_name, cache_dir="llm_weights"):
         low_cpu_mem_usage=True, 
         device_map="auto"
     )
-    
-    model.seqlen = model.config.max_position_embeddings 
+    model.seqlen = model.config.max_position_embeddings
+    # model.seqlen = min(4096,model.config.max_position_embeddings) 
     print("seqlen:",model.seqlen)
     return model
 

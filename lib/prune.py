@@ -468,7 +468,7 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
                 start = time.perf_counter()
                 delta_weight = (reference_weight-torch.mm(L, R)/s-wrapped_layers[name]()).float()
                 loss2 = ((delta_weight)**2).mean()
-                loss = (delta_weight@wrapped_layers[name].H).flatten() @ delta_weight.flatten() / len(delta_weight) + 0.1*loss2
+                loss = (delta_weight@wrapped_layers[name].H).flatten() @ delta_weight.flatten() / len(delta_weight) 
                 opt.zero_grad()
                 loss.backward()
                 opt.step()

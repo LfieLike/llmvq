@@ -218,7 +218,7 @@ class Quantization(nn.Module):
         codebook_offsets = torch.arange(0,self.layer.weight.data.numel()//self.centroid_len).to(self.dev)
         reconstruct_weight = F.embedding_bag(codes.flatten(),self.codebooks.flatten(0,1),codebook_offsets,mode="sum")
         return (reconstruct_weight.view(-1,self.bolck_size)*self.scales).view((self.rows, self.columns))
-    def update_index(self,residual):
+    def update_index(self,residual,num = 100):
         reshspe_weight = self.layer.weight.data.clone().to(residual.device)
         if residual is not None:
             reshspe_weight = reshspe_weight - residual
@@ -233,10 +233,28 @@ class Quantization(nn.Module):
         S_list = S.split(normalized_tensor.shape[0]//self.codebook_num,dim = 0)
         nearest_indices_list = []
         index = 0
-        for weight,s in zip(weight_list,S_list):
-            nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
-            nearest_indices_list.append(nearest_indices.unsqueeze(0))
-            index +=1
+        with torch.no_grad():
+            for weight,s in zip(weight_list,S_list):
+                # search
+                nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
+                unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
+                sorted_counts_indices = torch.argsort(counts)
+                # 找出出现次数小于20的索引
+                n = len(counts)  # 唯一元素的数量
+                threshold_5_percent = int(n * 0.05)  # 计算5%的元素数量
+
+                # 获取出现次数后5%和前5%的元素
+                elements_last_5_percent = unique_elements[sorted_counts_indices[-threshold_5_percent:]]
+                elements_first_5_percent = unique_elements[sorted_counts_indices[:threshold_5_percent]]
+                cnt_shape = self.codebooks[index][0].shape
+                for a,b in zip(elements_last_5_percent,elements_first_5_percent):
+                    cnt = self.codebooks[index][b].clone()+  torch.rand(cnt_shape).to(residual.device) * (1e-4 - 1e-5) + 5e-6
+                    self.codebooks[index][a] = cnt
+                nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
+                unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
+                print(counts)
+                nearest_indices_list.append(nearest_indices.unsqueeze(0))
+                index +=1
         del S
         nearest_indices_merge = torch.cat(nearest_indices_list,dim = 0)
         self.codes.data  =nearest_indices_merge
