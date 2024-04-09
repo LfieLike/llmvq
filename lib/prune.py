@@ -1,6 +1,8 @@
 import time 
 import heapq 
-import torch 
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
 import torch.nn as nn 
 from .sparsegpt import SparseGPT 
 from .layerwrapper import WrappedGPT
@@ -136,7 +138,7 @@ def low_rank_block(blocks, rank=1):
     low_rank = torch.bmm(torch.bmm(U_k, S_k_diag), Vh_k)
     return low_rank
 
-def process_tensor(tensor, rank=1, block_size=4):
+def process_tensor(tensor, rank=1, block_size=2):
     # Determine the size of the tensor
     rows, cols = tensor.size()
     # Reshape tensor to a batch of blocks
@@ -155,11 +157,24 @@ def prune_lowrank(args, model, tokenizer, device=torch.device("cuda:0"), prune_n
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
-
+        scale = 1000
         for name in subset:
             print("lowrank_name",name)
-            W = subset[name].weight.data.clone()
-            subset[name].weight.data = process_tensor(W.float()).half()
+            W = subset[name].weight.data.clone().float()
+            tensor_int32 = (W*scale).to(torch.int32)
+            numpy_array = tensor_int32[tensor_int32<256].cpu().numpy()
+            unique_elements, counts = np.unique(numpy_array, return_counts=True)
+            print("unique:",len(unique_elements))
+            print("bignum",(tensor_int32>256).sum())
+            # 使用Matplotlib绘制直方图
+            # plt.hist(numpy_array, bins=500, density=True, alpha=0.6)
+            # plt.title(name)
+            # plt.xlabel('Value')
+            # plt.ylabel('Density')
+            # plt.savefig("fig/"+name+".png")
+            # plt.clf()
+            tensor_int32 = tensor_int32/scale
+            subset[name].weight.data = tensor_int32.half()
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
