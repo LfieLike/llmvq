@@ -123,7 +123,43 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
                 W_mask = (W_metric<=thresh)
 
             W[W_mask] = 0
+def low_rank_block(blocks, rank=1):
+    # Perform batched SVD
+    u, s, v = torch.linalg.svd(blocks,full_matrices=False)
+    # Keep only the `rank` largest singular values and corresponding vectors
+    U_k = u[:, :, :rank] # 对 U 裁剪到前 k 列
+    Vh_k = v[:, :rank, :] # 对 Vh 裁剪到前 k 行
+    S_k = s[:, :rank]
+    # Use batched matrix multiplication to reconstruct the low-rank blocks
+    # S_k_diag = torch.zeros(S_k.shape[0], rank, rank).cuda()
+    S_k_diag= torch.diag_embed(S_k)
+    low_rank = torch.bmm(torch.bmm(U_k, S_k_diag), Vh_k)
+    return low_rank
 
+def process_tensor(tensor, rank=1, block_size=4):
+    # Determine the size of the tensor
+    rows, cols = tensor.size()
+    # Reshape tensor to a batch of blocks
+    blocks = tensor.unfold(0, block_size, block_size).unfold(1, block_size, block_size)
+    blocks = blocks.contiguous().view(-1, block_size, block_size)
+    # Perform low-rank approximation on each block in parallel
+    low_rank_blocks = low_rank_block(blocks, rank=rank)
+    # low_rank_blocks = blocks
+    # Reshape the output back to the original shape
+    output = low_rank_blocks.view(rows // block_size, cols // block_size, block_size, block_size)
+    output = output.permute(0, 2, 1, 3).reshape(rows, cols)
+    return output
+def prune_lowrank(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
+    layers = model.model.layers 
+
+    for i in range(len(layers)):
+        layer = layers[i]
+        subset = find_layers(layer)
+
+        for name in subset:
+            print("lowrank_name",name)
+            W = subset[name].weight.data.clone()
+            subset[name].weight.data = process_tensor(W.float()).half()
 def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
@@ -421,7 +457,7 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
         inps = inps.cpu()
         wrapped_layers = {}
         for name in subset:
-            wrapped_layers[name] = Quantization(subset[name],bolck_size=None,codebook_num=4)
+            wrapped_layers[name] = Quantization(subset[name],bolck_size=None,codebook_num=12, centroid_len = 4)
         print(inps[0].shape)
         def add_batch(name):
             def tmp(_, inp, out):
@@ -459,7 +495,7 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             
             # lowrank 初始化
             residual=(reference_weight-wrapped_layers[name]()).float()
-            output = low_rank_decomposition(residual*s, reduced_rank=256)
+            output = low_rank_decomposition(residual*s, reduced_rank=32)
             L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
             L=L.half().detach()
             R=R.half().detach()
@@ -489,19 +525,10 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
                 if epoch % 20 == 0:
                     wrapped_layers[name].update_index(torch.mm(L, R)/s)
                     residual=(reference_weight-wrapped_layers[name]()).float()
-                    output = low_rank_decomposition(residual*s, reduced_rank=256)
+                    output = low_rank_decomposition(residual*s, reduced_rank=32)
                     L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
                     L=L.half().detach()
                     R=R.half().detach()
-                # print(wrapped_layers[name].scales)
-                        # asvd || svd-LLM
-            # subset[name].weight.data = wrapped_layers[name]().half()
-            # residual=(reference_weight-subset[name].weight.data).float()
-            # output = low_rank_decomposition(residual@scaling_diag_matrix, reduced_rank=256)
-            # L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
-            # L=L.half()
-            # R=R.half()
-                       
             subset[name].weight.data=(wrapped_layers[name]().half()+torch.mm(L, R)/s).half()
             print(subset[name].weight.data.dtype)
             del wrapped_layers[name]

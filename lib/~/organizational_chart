@@ -1,0 +1,12 @@
+// Organizational Chart
+digraph {
+	1 [label="党委会"]
+	2 [label="党委组织部"]
+	3 [label="党委统战部"]
+	4 [label="党委宣传部"]
+	5 [label="党委办公室"]
+	1 -> 2
+	1 -> 3
+	1 -> 4
+	1 -> 5
+}

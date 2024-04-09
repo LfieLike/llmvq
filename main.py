@@ -5,7 +5,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from importlib.metadata import version
 
-from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers,prune_pq
+from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers,prune_pq,prune_lowrank
 from lib.eval import eval_ppl, eval_zero_shot
 # export HF_ENDPOINT=https://hf-mirror.com
 # export CUDA_VISIBLE_DEVICES=3
@@ -69,7 +69,7 @@ def main():
     if args.sparsity_ratio != 0:
         print("pruning starts")
         if args.prune_method == "wanda":
-            prune_pq(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
+            prune_lowrank(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif args.prune_method == "magnitude":
             prune_magnitude(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif args.prune_method == "sparsegpt":
