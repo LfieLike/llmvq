@@ -202,12 +202,14 @@ class Quantization(nn.Module):
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         self.H *= self.nsamples 
+        self.scaler_row *= self.nsamples / (self.nsamples+tmp)
         self.nsamples += tmp
         inp = inp.type(torch.float32)
         self.scaler_row += inp.abs().mean(dim=1)
         # inp = math.sqrt(2 / self.nsamples) * inp.float()
         self.H += inp.matmul(inp.t())
         self.H /=self.nsamples
+        self.scaler_row += torch.norm(inp, p=2, dim=1) ** 2  / self.nsamples
     def differentiable_dequantize(self):
         codebook_num = self.codebook_num
         codes = self.codes.clone().detach()
@@ -237,22 +239,22 @@ class Quantization(nn.Module):
             for weight,s in zip(weight_list,S_list):
                 # search
                 nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
-                unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
-                sorted_counts_indices = torch.argsort(counts)
-                # 找出出现次数小于20的索引
-                n = len(counts)  # 唯一元素的数量
-                threshold_5_percent = int(n * 0.05)  # 计算5%的元素数量
+                # unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
+                # sorted_counts_indices = torch.argsort(counts)
+                # # 找出出现次数小于20的索引
+                # n = len(counts)  # 唯一元素的数量
+                # threshold_5_percent = int(n * 0.05)  # 计算5%的元素数量
 
-                # 获取出现次数后5%和前5%的元素
-                elements_last_5_percent = unique_elements[sorted_counts_indices[-threshold_5_percent:]]
-                elements_first_5_percent = unique_elements[sorted_counts_indices[:threshold_5_percent]]
-                cnt_shape = self.codebooks[index][0].shape
-                for a,b in zip(elements_last_5_percent,elements_first_5_percent):
-                    cnt = self.codebooks[index][b].clone()+  torch.rand(cnt_shape).to(residual.device) * (1e-4 - 1e-5) + 5e-6
-                    self.codebooks[index][a] = cnt
-                nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
-                unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
-                print(counts)
+                # # 获取出现次数后5%和前5%的元素
+                # elements_last_5_percent = unique_elements[sorted_counts_indices[-threshold_5_percent:]]
+                # elements_first_5_percent = unique_elements[sorted_counts_indices[:threshold_5_percent]]
+                # cnt_shape = self.codebooks[index][0].shape
+                # for a,b in zip(elements_last_5_percent,elements_first_5_percent):
+                #     cnt = self.codebooks[index][b].clone()+  torch.rand(cnt_shape).to(residual.device) * (1e-4 - 1e-5) + 5e-6
+                #     self.codebooks[index][a] = cnt
+                # nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
+                # unique_elements, counts = torch.unique(nearest_indices, return_counts=True)
+                # print(counts)
                 nearest_indices_list.append(nearest_indices.unsqueeze(0))
                 index +=1
         del S

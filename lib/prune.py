@@ -421,7 +421,7 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
         inps = inps.cpu()
         wrapped_layers = {}
         for name in subset:
-            wrapped_layers[name] = Quantization(subset[name],bolck_size=None,codebook_num=4)
+            wrapped_layers[name] = Quantization(subset[name],bolck_size=256,codebook_num=4)
         print(inps[0].shape)
         def add_batch(name):
             def tmp(_, inp, out):
@@ -459,11 +459,17 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             
             # lowrank 初始化
             residual=(reference_weight-wrapped_layers[name]()).float()
-            output = low_rank_decomposition(residual*s, reduced_rank=256)
+            W_metric = torch.abs(residual) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+            sort_res = torch.sort(W_metric, dim=-1, stable=True)
+            W_mask = (torch.zeros_like(W_metric) == 1)
+            indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+            W_mask.scatter_(1, indices, True)
+            residual[W_mask] = 0 
+            output = low_rank_decomposition(residual*s, reduced_rank=32)
             L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
             L=L.half().detach()
             R=R.half().detach()
-            
+
             for epoch in range(200):
                 start = time.perf_counter()
                 delta_weight = (reference_weight-torch.mm(L, R)/s-wrapped_layers[name]()).float()
@@ -489,7 +495,13 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
                 if epoch % 20 == 0:
                     wrapped_layers[name].update_index(torch.mm(L, R)/s)
                     residual=(reference_weight-wrapped_layers[name]()).float()
-                    output = low_rank_decomposition(residual*s, reduced_rank=256)
+                    W_metric = torch.abs(residual) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+                    sort_res = torch.sort(W_metric, dim=-1, stable=True)
+                    W_mask = (torch.zeros_like(W_metric) == 1)
+                    indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+                    W_mask.scatter_(1, indices, True)
+                    residual[W_mask] = 0 
+                    output = low_rank_decomposition(residual*s, reduced_rank=32)
                     L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
                     L=L.half().detach()
                     R=R.half().detach()
@@ -501,7 +513,6 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             # L, R, reduced_rank = output['L'], output['R'], output['reduced_rank']
             # L=L.half()
             # R=R.half()
-                       
             subset[name].weight.data=(wrapped_layers[name]().half()+torch.mm(L, R)/s).half()
             print(subset[name].weight.data.dtype)
             del wrapped_layers[name]
