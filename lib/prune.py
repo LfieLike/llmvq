@@ -157,15 +157,24 @@ def prune_lowrank(args, model, tokenizer, device=torch.device("cuda:0"), prune_n
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
-        scale = 1000
+        scale = 200
+        {"self_attn.o_proj":1000,"self_attn.v_proj":1000}
         for name in subset:
             print("lowrank_name",name)
+            if "o_proj" in name:
+                scale = 400
+            elif "v_proh" in name:
+                scale = 400
+            else:
+                scale = 256
             W = subset[name].weight.data.clone().float()
             tensor_int32 = (W*scale).to(torch.int32)
+            print((tensor_int32>256).sum())
             numpy_array = tensor_int32[tensor_int32<256].cpu().numpy()
+            absunique_elements, counts = np.unique(np.abs(numpy_array), return_counts=True)
+            print("unique:",len(absunique_elements))
             unique_elements, counts = np.unique(numpy_array, return_counts=True)
             print("unique:",len(unique_elements))
-            print("bignum",(tensor_int32>256).sum())
             # 使用Matplotlib绘制直方图
             # plt.hist(numpy_array, bins=500, density=True, alpha=0.6)
             # plt.title(name)
@@ -495,7 +504,8 @@ def prune_pq(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, p
             # scaling_diag_matrix,scaling_matrix_inv=Cholesk(raw_scaling_diag_matrix)
             # scaling_diag_matrix=scaling_diag_matrix.float()
             # scaling_matrix_inv=scaling_matrix_inv.half()
-            
+            # with torch.no_grad():
+            #     wrapped_layers[name].update_index(update=True)
             # asvd
             s = wrapped_layers[name].scaler_row.view(1,-1)**0.5
             

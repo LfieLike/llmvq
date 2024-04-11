@@ -110,22 +110,16 @@ def fit_kmeans(
     nearest_indices = torch.cat([nearest_indices[gi].to(devices[0]) for gi in range(len(devices))], dim=0)
     reconstructed_data = clusters[nearest_indices]
     return clusters, nearest_indices, reconstructed_data
-
+    
 def get_nearest_indices(
     S: torch.Tensor, #重要性
     W,
     shape, # 权重的原始形状
     centroids,
-    devices: Optional[List[torch.device]] = None,
 ):
     if S is None:
         S = torch.zeros(shape[0]).to(W.device)
         S[0] = 1
-        # S[0] = 1
-    # if devices is None:
-    #     devices = [data.device]
-    # W  N*D
-    # centroids n_centroids*D
     assignments_list = []
     a1 = W.view(-1,centroids.shape[-1]).unsqueeze(1)
     # S为每一行的重要性权重，将其扩展成矩阵形式，方便计算
@@ -138,10 +132,6 @@ def get_nearest_indices(
         assignments_list.append(dist.argmin(-1))
     
     assignments = torch.cat(assignments_list,dim=0)
-    # dist =((a1-b1)**2*s1).sum(-1)
-    # assignmentss = dist.argmin(-1)
-    # print(assignments - assignmentss)
-    # print(assignments.shape)
     return assignments
 def quantize(org_weight,codebook_num = 2,centroids_num = 256,block_size = 64,centroid_len = 8):
     # 计算每一行的二范数
@@ -218,8 +208,8 @@ class Quantization(nn.Module):
         codebook_offsets = torch.arange(0,self.layer.weight.data.numel()//self.centroid_len).to(self.dev)
         reconstruct_weight = F.embedding_bag(codes.flatten(),self.codebooks.flatten(0,1),codebook_offsets,mode="sum")
         return (reconstruct_weight.view(-1,self.bolck_size)*self.scales).view((self.rows, self.columns))
-    def update_index(self,residual,num = 100):
-        reshspe_weight = self.layer.weight.data.clone().to(residual.device)
+    def update_index(self,residual=None,update=False):
+        reshspe_weight = self.layer.weight.data.clone()
         if residual is not None:
             reshspe_weight = reshspe_weight - residual
         reshspe_weight = reshspe_weight.view(-1,self.bolck_size)
@@ -235,6 +225,10 @@ class Quantization(nn.Module):
         index = 0
         for weight,s in zip(weight_list,S_list):
             # search
+            if update:
+                for i in range(100):
+                    nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
+                    self.codebooks[index].index_reduce_(dim = 0,index=nearest_indices,source = weight.view(-1,self.centroid_len),reduce="mean")
             nearest_indices=get_nearest_indices(S=s,W = weight.view(-1,self.centroid_len),shape = weight.shape,centroids=self.codebooks[index])
             nearest_indices_list.append(nearest_indices.unsqueeze(0))
             index +=1
